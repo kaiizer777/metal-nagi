@@ -141,6 +141,13 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
     .await
     {
         Ok(res) => res,
+        Err(db::DbError::IssueNumberOverflow(num)) => {
+            warn!(number = num, "issue or pr number exceeds 32-bit integer limit");
+            return json_response(
+                400,
+                json!({ "status": "invalid_payload", "message": format!("issue number {num} exceeds maximum allowed value") }),
+            );
+        }
         Err(e) => {
             error!(error = %e, "failed to acquire concurrency lock");
             return json_response(
@@ -168,17 +175,23 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
                 .await
                 {
                     Ok(octo) => {
-                        if let Err(e) = post_locked_comment(
+                        let issue_num_u64 = u64::try_from(webhook_event.issue.number).unwrap_or(0);
+                        let post_comment_fut = post_locked_comment(
                             &octo,
                             &webhook_event.repository.owner.login,
                             &webhook_event.repository.name,
-                            webhook_event.issue.number as u64,
+                            issue_num_u64,
                             &job_id,
                             current_phase,
-                        )
-                        .await
-                        {
-                            warn!(error = %e, "failed to post lock comment to GitHub");
+                        );
+                        match tokio::time::timeout(std::time::Duration::from_secs(10), post_comment_fut).await {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(e)) => {
+                                warn!(error = %e, "failed to post lock comment to GitHub");
+                            }
+                            Err(_) => {
+                                warn!("timed out posting lock comment to GitHub");
+                            }
                         }
                     }
                     Err(e) => {
@@ -220,6 +233,9 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
             }
             Err(e) => {
                 error!(job_id = %job_id, error = %e, "git shallow clone failed");
+                if let Err(status_err) = db::update_job_status(&state.pool, job_id, "failed", 1).await {
+                    error!(job_id = %job_id, error = %status_err, "failed to update job status to failed");
+                }
                 return json_response(
                     500,
                     json!({

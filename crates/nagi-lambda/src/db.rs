@@ -10,6 +10,8 @@ pub enum DbError {
     Sqlx(#[from] sqlx::Error),
     #[error("Active job conflict detected, but failed to fetch existing job")]
     ConflictMissingJob,
+    #[error("Issue or PR number {0} exceeds 32-bit integer limit")]
+    IssueNumberOverflow(i64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +81,8 @@ pub async fn check_and_acquire_lock(
     issue_or_pr_number: i64,
     pipeline_type: PipelineType,
 ) -> Result<LockResult, DbError> {
-    let issue_num_i32 = issue_or_pr_number as i32;
+    let issue_num_i32 = i32::try_from(issue_or_pr_number)
+        .map_err(|_| DbError::IssueNumberOverflow(issue_or_pr_number))?;
 
     // 1. Check if active job lock already exists
     let active_job: Option<(Uuid, i32, String)> = sqlx::query_as(
@@ -130,6 +133,32 @@ pub async fn check_and_acquire_lock(
         }
         Err(e) => Err(DbError::Sqlx(e)),
     }
+}
+
+pub async fn update_job_status(
+    pool: &PgPool,
+    job_id: Uuid,
+    status: &str,
+    current_phase: i32,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE jobs SET status = $1, current_phase = $2, updated_at = now() WHERE job_id = $3",
+    )
+    .bind(status)
+    .bind(current_phase)
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn release_lock(
+    pool: &PgPool,
+    job_id: Uuid,
+    final_status: &str,
+) -> Result<(), DbError> {
+    update_job_status(pool, job_id, final_status, 1).await
 }
 
 pub fn format_locked_comment(job_id: &Uuid, current_phase: i32) -> String {
@@ -192,5 +221,22 @@ mod tests {
             comment,
             "⚠️ Nagi job `550e8400-e29b-41d4-a716-446655440000` is already in progress (Phase 2) on this issue/PR."
         );
+    }
+
+    #[test]
+    fn test_issue_number_overflow() {
+        let huge_number = i64::from(i32::MAX) + 1;
+        let res = i32::try_from(huge_number).map_err(|_| DbError::IssueNumberOverflow(huge_number));
+        assert!(matches!(res, Err(DbError::IssueNumberOverflow(n)) if n == huge_number));
+    }
+
+    #[tokio::test]
+    async fn test_check_and_acquire_lock_overflow() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://dummy:dummy@localhost:5432/dummy")
+            .unwrap();
+        let huge_number = i64::from(i32::MAX) + 1;
+        let res = check_and_acquire_lock(&pool, "owner/repo", huge_number, PipelineType::A).await;
+        assert!(matches!(res, Err(DbError::IssueNumberOverflow(n)) if n == huge_number));
     }
 }
