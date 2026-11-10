@@ -38,6 +38,14 @@ pub fn resolve_target_path(job_id: &Uuid) -> PathBuf {
     std::env::temp_dir().join("repos").join(job_id.to_string())
 }
 
+pub async fn cleanup_repo_dir(path: &Path) -> Result<(), std::io::Error> {
+    match tokio::fs::remove_dir_all(path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 pub async fn shallow_clone_repo_with_token(
     token: &SecretString,
     repo: &str,
@@ -50,17 +58,21 @@ pub async fn shallow_clone_repo_with_token(
     }
 
     if target_path.exists() {
-        tokio::fs::remove_dir_all(&target_path).await?;
+        cleanup_repo_dir(&target_path).await?;
     }
 
     let git_bin = resolve_git_binary();
-    let clone_url = format!(
-        "https://x-access-token:{}@github.com/{repo}.git",
-        token.expose_secret()
-    );
+    let clone_url = format!("https://github.com/{repo}.git");
 
     let mut cmd = tokio::process::Command::new(git_bin);
-    cmd.arg("clone")
+    cmd.kill_on_drop(true);
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.arg("-c")
+        .arg(format!(
+            "http.extraHeader=Authorization: Bearer {}",
+            token.expose_secret()
+        ))
+        .arg("clone")
         .arg("--depth")
         .arg("1")
         .arg(&clone_url)
@@ -120,6 +132,24 @@ mod tests {
             sanitized,
             "fatal: unable to access 'https://x-access-token:[REDACTED]@github.com/foo/bar.git': 403"
         );
+
+        let header_err = format!("fatal: -c http.extraHeader=Authorization: Bearer {token} 403");
+        let sanitized_header = sanitize_token(&header_err, token);
+        assert!(!sanitized_header.contains(token));
+        assert!(sanitized_header.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_repo_dir() {
+        let temp_dir = std::env::temp_dir().join(format!("test_cleanup_repo_dir_{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+        assert!(temp_dir.exists());
+
+        cleanup_repo_dir(&temp_dir).await.unwrap();
+        assert!(!temp_dir.exists());
+
+        // Calling on non-existent dir should also succeed gracefully
+        cleanup_repo_dir(&temp_dir).await.unwrap();
     }
 
     #[test]
