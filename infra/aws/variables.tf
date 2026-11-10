@@ -15,3 +15,32 @@ variable "lambda_zip_path" {
   default     = "../../target/lambda/nagi-lambda/bootstrap.zip"
   description = "Path to the Lambda deployment zip archive"
 }
+
+variable "database_url" {
+  type        = string
+  sensitive   = true
+  description = "Postgres connection string for database access"
+}
+
+variable "github_app_id" {
+  type        = string
+  description = "GitHub App ID"
+}
+
+variable "github_app_webhook_secret" {
+  type        = string
+  sensitive   = true
+  description = "GitHub App Webhook Secret for HMAC verification"
+}
+
+variable "github_app_private_key" {
+  type        = string
+  sensitive   = true
+  description = "GitHub App RSA private key (PEM format)"
+}
+
+variable "rust_log" {
+  type        = string
+  default     = "info,nagi_lambda=debug"
+  description = "RUST_LOG logging level filter"
+}
