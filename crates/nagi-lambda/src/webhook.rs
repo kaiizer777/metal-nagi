@@ -73,7 +73,43 @@ pub fn parse_pipeline_type(issue: &IssuePayload) -> PipelineType {
 }
 
 pub fn contains_mention(body: &str) -> bool {
-    body.to_ascii_lowercase().contains("@nagi")
+    let bytes = body.as_bytes();
+    let target_len = 5; // "@nagi".len()
+
+    if bytes.len() < target_len {
+        return false;
+    }
+
+    let mut i = 0;
+    while i + target_len <= bytes.len() {
+        if bytes[i] == b'@'
+            && bytes[i + 1].to_ascii_lowercase() == b'n'
+            && bytes[i + 2].to_ascii_lowercase() == b'a'
+            && bytes[i + 3].to_ascii_lowercase() == b'g'
+            && bytes[i + 4].to_ascii_lowercase() == b'i'
+        {
+            let valid_prefix = if i == 0 {
+                true
+            } else {
+                let prev = bytes[i - 1];
+                !prev.is_ascii_alphanumeric() && prev != b'_' && prev != b'-' && prev != b'.'
+            };
+
+            let valid_suffix = if i + target_len == bytes.len() {
+                true
+            } else {
+                let next = bytes[i + target_len];
+                !next.is_ascii_alphanumeric() && next != b'_' && next != b'-'
+            };
+
+            if valid_prefix && valid_suffix {
+                return true;
+            }
+        }
+        i += 1;
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -82,9 +118,16 @@ mod tests {
 
     #[test]
     fn detects_at_nagi_case_insensitively() {
-        assert!(contains_mention("@nagi build this"));
-        assert!(contains_mention("Hey @Nagi please review"));
+        assert!(contains_mention("@nagi help"));
+        assert!(contains_mention("@NAGI please review"));
+        assert!(contains_mention("Hey @nagi!"));
+        assert!(contains_mention("@nagi, please check"));
+        assert!(contains_mention("cc: @nagi:"));
         assert!(contains_mention("PING @NAGI"));
+
+        assert!(!contains_mention("@nagi-bot"));
+        assert!(!contains_mention("foo@nagi.com"));
+        assert!(!contains_mention("@nagisomething"));
         assert!(!contains_mention("No bot mentioned here"));
         assert!(!contains_mention("@otherbot help"));
     }
