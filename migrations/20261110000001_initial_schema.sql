@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     job_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     repo TEXT NOT NULL,
     issue_or_pr_number INT NOT NULL,
-    pipeline_type VARCHAR(1) NOT NULL,
+    pipeline_type VARCHAR(1) NOT NULL CHECK (pipeline_type IN ('A', 'B')),
     status VARCHAR(32) NOT NULL,
     current_phase INT NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -83,3 +83,4 @@ CREATE TABLE IF NOT EXISTS repo_configs (
     allowed_senders JSONB NOT NULL DEFAULT '[]'::jsonb,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
