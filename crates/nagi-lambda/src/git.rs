@@ -95,13 +95,18 @@ pub async fn shallow_clone_repo_with_token(
     let output = match output_res {
         Ok(Ok(output)) => output,
         Ok(Err(io_err)) => {
+            let _ = cleanup_repo_dir(&target_path).await;
             let msg = sanitize_token(&io_err.to_string(), token.expose_secret());
             return Err(GitError::Io(std::io::Error::new(io_err.kind(), msg)));
         }
-        Err(_) => return Err(GitError::Timeout(timeout_duration)),
+        Err(_) => {
+            let _ = cleanup_repo_dir(&target_path).await;
+            return Err(GitError::Timeout(timeout_duration));
+        }
     };
 
     if !output.status.success() {
+        let _ = cleanup_repo_dir(&target_path).await;
         let raw_stderr = String::from_utf8_lossy(&output.stderr);
         let sanitized_stderr = sanitize_token(&raw_stderr, token.expose_secret());
         return Err(GitError::CommandFailed {
