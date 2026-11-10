@@ -94,9 +94,9 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
         return json_response(200, json!({ "status": "ignored_action" }));
     }
 
-    // 6. Check @nagi mention
+    // 6. Check @metal-nagi mention
     if !contains_mention(&webhook_event.comment.body) {
-        info!("comment body does not contain @nagi mention");
+        info!("comment body does not contain @metal-nagi mention");
         return json_response(200, json!({ "status": "no_mention" }));
     }
 
@@ -421,7 +421,7 @@ mod tests {
             },
             "comment": {
                 "id": 10,
-                "body": "@nagi run",
+                "body": "@metal-nagi run",
                 "user": { "login": "saif" }
             },
             "repository": {

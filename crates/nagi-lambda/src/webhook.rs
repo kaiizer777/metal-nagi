@@ -73,8 +73,9 @@ pub fn parse_pipeline_type(issue: &IssuePayload) -> PipelineType {
 }
 
 pub fn contains_mention(body: &str) -> bool {
+    let target = b"@metal-nagi";
+    let target_len = target.len();
     let bytes = body.as_bytes();
-    let target_len = 5; // "@nagi".len()
 
     if bytes.len() < target_len {
         return false;
@@ -83,10 +84,10 @@ pub fn contains_mention(body: &str) -> bool {
     let mut i = 0;
     while i + target_len <= bytes.len() {
         if bytes[i] == b'@'
-            && bytes[i + 1].to_ascii_lowercase() == b'n'
-            && bytes[i + 2].to_ascii_lowercase() == b'a'
-            && bytes[i + 3].to_ascii_lowercase() == b'g'
-            && bytes[i + 4].to_ascii_lowercase() == b'i'
+            && bytes[i..i + target_len]
+                .iter()
+                .zip(target.iter())
+                .all(|(a, b)| a.to_ascii_lowercase() == *b)
         {
             let valid_prefix = if i == 0 {
                 true
@@ -117,17 +118,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_at_nagi_case_insensitively() {
-        assert!(contains_mention("@nagi help"));
-        assert!(contains_mention("@NAGI please review"));
-        assert!(contains_mention("Hey @nagi!"));
-        assert!(contains_mention("@nagi, please check"));
-        assert!(contains_mention("cc: @nagi:"));
-        assert!(contains_mention("PING @NAGI"));
+    fn detects_at_metal_nagi_case_insensitively() {
+        assert!(contains_mention("@metal-nagi help"));
+        assert!(contains_mention("@METAL-NAGI please review"));
+        assert!(contains_mention("Hey @metal-nagi!"));
+        assert!(contains_mention("@metal-nagi, please check"));
+        assert!(contains_mention("cc: @metal-nagi:"));
+        assert!(contains_mention("PING @METAL-NAGI"));
 
-        assert!(!contains_mention("@nagi-bot"));
-        assert!(!contains_mention("foo@nagi.com"));
-        assert!(!contains_mention("@nagisomething"));
+        assert!(!contains_mention("@nagi"));
+        assert!(!contains_mention("@NAGI"));
+        assert!(!contains_mention("@metal-nagi-bot"));
+        assert!(!contains_mention("foo@metal-nagi.com"));
+        assert!(!contains_mention("@metal-nagisomething"));
         assert!(!contains_mention("No bot mentioned here"));
         assert!(!contains_mention("@otherbot help"));
     }
@@ -162,7 +165,7 @@ mod tests {
             },
             "comment": {
                 "id": 999123,
-                "body": "@nagi run pipeline",
+                "body": "@metal-nagi run pipeline",
                 "user": {
                     "login": "saif"
                 }
@@ -189,7 +192,7 @@ mod tests {
         assert_eq!(event.issue.title.as_deref(), Some("Test Issue"));
         assert!(event.issue.pull_request.is_none());
         assert_eq!(event.comment.id, 999123);
-        assert_eq!(event.comment.body, "@nagi run pipeline");
+        assert_eq!(event.comment.body, "@metal-nagi run pipeline");
         assert_eq!(event.comment.user.login, "saif");
         assert_eq!(event.repository.name, "metal-nagi");
         assert_eq!(event.repository.full_name, "saif/metal-nagi");
@@ -213,7 +216,7 @@ mod tests {
             },
             "comment": {
                 "id": 888,
-                "body": "LGTM @NAGI",
+                "body": "LGTM @METAL-NAGI",
                 "user": {
                     "login": "reviewer"
                 }
