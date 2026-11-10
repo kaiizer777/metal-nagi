@@ -3,7 +3,7 @@ use secrecy::SecretString;
 
 use crate::error::GhCoreError;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GitHubAppConfig {
     app_id: u64,
     private_key_pem: SecretString,
@@ -55,7 +55,10 @@ impl GitHubAppConfig {
         };
 
         let webhook_secret = std::env::var("GITHUB_APP_WEBHOOK_SECRET")
-            .unwrap_or_default();
+            .map_err(|_| GhCoreError::Config("GITHUB_APP_WEBHOOK_SECRET is required".into()))?;
+        if webhook_secret.trim().is_empty() {
+            return Err(GhCoreError::Config("GITHUB_APP_WEBHOOK_SECRET is required".into()));
+        }
 
         Ok(Self {
             app_id,
@@ -76,3 +79,27 @@ impl GitHubAppConfig {
         &self.webhook_secret
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_env_fails_when_webhook_secret_missing() {
+        // SAFETY: Only in unit test for testing env var parsing
+        unsafe {
+            std::env::set_var("GITHUB_APP_ID", "12345");
+            std::env::set_var("GITHUB_APP_PRIVATE_KEY", "dummy-key");
+            std::env::remove_var("GITHUB_APP_WEBHOOK_SECRET");
+        }
+
+        let err = GitHubAppConfig::from_env().unwrap_err();
+        match err {
+            GhCoreError::Config(msg) => {
+                assert_eq!(msg, "GITHUB_APP_WEBHOOK_SECRET is required");
+            }
+            other => panic!("Expected Config error, got {other:?}"),
+        }
+    }
+}
+
