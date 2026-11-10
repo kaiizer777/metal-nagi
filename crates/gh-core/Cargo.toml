@@ -1,0 +1,22 @@
+[package]
+name = "gh-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+jsonwebtoken = "9.3"
+octocrab = { version = "0.42", default-features = false, features = ["rustls", "default-client"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+thiserror = { workspace = true }
+secrecy = { version = "0.10", features = ["serde"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+

@@ -1,0 +1,7 @@
+-- Down Migration: Revert Initial Schema v1
+DROP TABLE IF EXISTS repo_configs CASCADE;
+DROP TABLE IF EXISTS provider_models CASCADE;
+DROP TABLE IF EXISTS providers CASCADE;
+DROP TABLE IF EXISTS coder_outputs CASCADE;
+DROP TABLE IF EXISTS job_phases CASCADE;
+DROP TABLE IF EXISTS jobs CASCADE;

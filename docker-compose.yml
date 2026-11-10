@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: metal-nagi-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: metal_nagi
+      POSTGRES_PASSWORD: metal_nagi_secret
+      POSTGRES_DB: metal_nagi
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/20261110000001_initial_schema.sql:/docker-entrypoint-initdb.d/01_initial_schema.sql:ro
+
+volumes:
+  postgres_data:
