@@ -3,3 +3,9 @@ Cargo.lock
 .env
 .env.*
 !.env.example
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl

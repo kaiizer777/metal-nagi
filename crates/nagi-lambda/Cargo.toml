@@ -1,0 +1,12 @@
+[package]
+name = "nagi-lambda"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lambda_http = { version = "0.13", default-features = false, features = ["apigw_http"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
