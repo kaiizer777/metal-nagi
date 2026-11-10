@@ -259,6 +259,14 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
         if let Err(status_err) = db::release_lock(&state.pool, job_id, "failed").await {
             error!(job_id = %job_id, error = %status_err, "failed to release lock for missing installation");
         }
+        return json_response(
+            500,
+            json!({
+                "status": "error",
+                "job_id": job_id,
+                "message": "missing installation id in webhook event",
+            }),
+        );
     }
 
     // 11. Return 200 OK with job info
