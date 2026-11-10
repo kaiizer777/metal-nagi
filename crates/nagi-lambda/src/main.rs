@@ -235,11 +235,14 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
                 if let Err(cleanup_err) = cleanup_repo_dir(&repo_path).await {
                     warn!(job_id = %job_id, path = %repo_path.display(), error = %cleanup_err, "failed to cleanup clone directory");
                 }
+                if let Err(status_err) = db::update_job_status(&state.pool, job_id, "completed", 1).await {
+                    error!(job_id = %job_id, error = %status_err, "failed to update job status to completed");
+                }
             }
             Err(e) => {
                 error!(job_id = %job_id, error = %e, "git shallow clone failed");
-                if let Err(status_err) = db::update_job_status(&state.pool, job_id, "failed", 1).await {
-                    error!(job_id = %job_id, error = %status_err, "failed to update job status to failed");
+                if let Err(status_err) = db::release_lock(&state.pool, job_id, "failed").await {
+                    error!(job_id = %job_id, error = %status_err, "failed to release lock / update job status to failed");
                 }
                 return json_response(
                     500,
@@ -253,6 +256,9 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
         }
     } else {
         warn!(job_id = %job_id, "no installation id present in webhook event, skipping clone");
+        if let Err(status_err) = db::release_lock(&state.pool, job_id, "failed").await {
+            error!(job_id = %job_id, error = %status_err, "failed to release lock for missing installation");
+        }
     }
 
     // 11. Return 200 OK with job info
