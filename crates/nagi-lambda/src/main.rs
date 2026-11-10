@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use lambda_http::{run, service_fn, Body, Error, Request, Response};
 use nagi_lambda::db::{self, post_locked_comment, LockResult};
-use nagi_lambda::git::shallow_clone_repo;
+use nagi_lambda::git::{cleanup_repo_dir, shallow_clone_repo};
 use nagi_lambda::webhook::{contains_mention, parse_pipeline_type, IssueCommentWebhookEvent};
 use serde_json::json;
 use sqlx::PgPool;
@@ -168,34 +168,36 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
                 "job already in progress; posting status comment"
             );
             if let Some(installation) = &webhook_event.installation {
-                match gh_core::create_app_installation_client(
-                    &state.github_config,
-                    installation.id,
-                )
-                .await
-                {
-                    Ok(octo) => {
-                        let issue_num_u64 = u64::try_from(webhook_event.issue.number).unwrap_or(0);
-                        let post_comment_fut = post_locked_comment(
-                            &octo,
-                            &webhook_event.repository.owner.login,
-                            &webhook_event.repository.name,
-                            issue_num_u64,
-                            &job_id,
-                            current_phase,
-                        );
-                        match tokio::time::timeout(std::time::Duration::from_secs(10), post_comment_fut).await {
-                            Ok(Ok(_)) => {}
-                            Ok(Err(e)) => {
-                                warn!(error = %e, "failed to post lock comment to GitHub");
-                            }
-                            Err(_) => {
-                                warn!("timed out posting lock comment to GitHub");
-                            }
-                        }
+                let post_comment_task = async {
+                    let octo = gh_core::create_app_installation_client(
+                        &state.github_config,
+                        installation.id,
+                    )
+                    .await
+                    .map_err(|e| format!("failed to create installation client: {e}"))?;
+
+                    let issue_num_u64 = u64::try_from(webhook_event.issue.number).unwrap_or(0);
+                    post_locked_comment(
+                        &octo,
+                        &webhook_event.repository.owner.login,
+                        &webhook_event.repository.name,
+                        issue_num_u64,
+                        &job_id,
+                        current_phase,
+                    )
+                    .await
+                    .map_err(|e| format!("failed to post lock comment: {e}"))?;
+
+                    Ok::<(), String>(())
+                };
+
+                match tokio::time::timeout(std::time::Duration::from_secs(10), post_comment_task).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        warn!(error = %e, "failed to post lock comment to GitHub");
                     }
-                    Err(e) => {
-                        warn!(error = %e, "failed to create installation client for lock comment");
+                    Err(_) => {
+                        warn!("timed out posting lock comment to GitHub");
                     }
                 }
             }
@@ -228,8 +230,11 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
         )
         .await
         {
-            Ok(path) => {
-                info!(job_id = %job_id, path = %path.display(), "shallow clone succeeded");
+            Ok(repo_path) => {
+                info!(job_id = %job_id, path = %repo_path.display(), "shallow clone succeeded");
+                if let Err(cleanup_err) = cleanup_repo_dir(&repo_path).await {
+                    warn!(job_id = %job_id, path = %repo_path.display(), error = %cleanup_err, "failed to cleanup clone directory");
+                }
             }
             Err(e) => {
                 error!(job_id = %job_id, error = %e, "git shallow clone failed");

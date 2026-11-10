@@ -46,6 +46,29 @@ pub async fn cleanup_repo_dir(path: &Path) -> Result<(), std::io::Error> {
     }
 }
 
+pub fn build_clone_command(
+    git_bin: &str,
+    token: &SecretString,
+    clone_url: &str,
+    target_path: &Path,
+) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(git_bin);
+    cmd.kill_on_drop(true);
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+        .env(
+            "GIT_CONFIG_VALUE_0",
+            format!("Authorization: Bearer {}", token.expose_secret()),
+        );
+    cmd.arg("clone")
+        .arg("--depth")
+        .arg("1")
+        .arg(clone_url)
+        .arg(target_path);
+    cmd
+}
+
 pub async fn shallow_clone_repo_with_token(
     token: &SecretString,
     repo: &str,
@@ -64,19 +87,7 @@ pub async fn shallow_clone_repo_with_token(
     let git_bin = resolve_git_binary();
     let clone_url = format!("https://github.com/{repo}.git");
 
-    let mut cmd = tokio::process::Command::new(git_bin);
-    cmd.kill_on_drop(true);
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
-    cmd.arg("-c")
-        .arg(format!(
-            "http.extraHeader=Authorization: Bearer {}",
-            token.expose_secret()
-        ))
-        .arg("clone")
-        .arg("--depth")
-        .arg("1")
-        .arg(&clone_url)
-        .arg(&target_path);
+    let mut cmd = build_clone_command(git_bin, token, &clone_url, &target_path);
 
     let timeout_duration = Duration::from_secs(15);
     let output_res = tokio::time::timeout(timeout_duration, cmd.output()).await;
@@ -169,5 +180,57 @@ mod tests {
     fn test_resolve_git_binary() {
         let git_bin = resolve_git_binary();
         assert!(git_bin == "/opt/bin/git" || git_bin == "git");
+    }
+
+    #[test]
+    fn test_build_clone_command_env_vars_and_no_token_in_args() {
+        let token = SecretString::from("ghs_testsecrettoken123");
+        let target = Path::new("/tmp/repos/test");
+        let cmd = build_clone_command("git", &token, "https://github.com/foo/bar.git", target);
+        let std_cmd = cmd.as_std();
+
+        let args: Vec<String> = std_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+
+        // Ensure token and header flag do not appear in process argv
+        for arg in &args {
+            assert!(!arg.contains("ghs_testsecrettoken123"));
+            assert!(!arg.contains("extraHeader"));
+            assert_ne!(arg, "-c");
+        }
+        assert_eq!(
+            args,
+            vec!["clone", "--depth", "1", "https://github.com/foo/bar.git", target.to_str().unwrap()]
+        );
+
+        // Ensure token is passed safely via GIT_CONFIG environment variables
+        let envs: std::collections::HashMap<String, Option<String>> = std_cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().to_string(),
+                    v.map(|val| val.to_string_lossy().to_string()),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            envs.get("GIT_TERMINAL_PROMPT").and_then(|v| v.as_deref()),
+            Some("0")
+        );
+        assert_eq!(
+            envs.get("GIT_CONFIG_COUNT").and_then(|v| v.as_deref()),
+            Some("1")
+        );
+        assert_eq!(
+            envs.get("GIT_CONFIG_KEY_0").and_then(|v| v.as_deref()),
+            Some("http.extraHeader")
+        );
+        assert_eq!(
+            envs.get("GIT_CONFIG_VALUE_0").and_then(|v| v.as_deref()),
+            Some("Authorization: Bearer ghs_testsecrettoken123")
+        );
     }
 }
