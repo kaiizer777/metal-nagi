@@ -12,6 +12,16 @@ resource "aws_lambda_function" "nagi" {
 
   timeout     = 30
   memory_size = 256
+
+  environment {
+    variables = {
+      DATABASE_URL              = var.database_url
+      GITHUB_APP_ID             = var.github_app_id
+      GITHUB_APP_WEBHOOK_SECRET = var.github_app_webhook_secret
+      GITHUB_APP_PRIVATE_KEY    = var.github_app_private_key
+      RUST_LOG                  = var.rust_log
+    }
+  }
 }
 
 resource "aws_lambda_function_url" "nagi_url" {

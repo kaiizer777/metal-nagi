@@ -9,3 +9,5 @@ Cargo.lock
 *.tfstate
 *.tfstate.*
 .terraform.lock.hcl
+*.tfvars
+*.tfvars.json
