@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS providers (
     name TEXT UNIQUE NOT NULL,
     priority INT UNIQUE NOT NULL,
     api_key_env_var TEXT NOT NULL,
+    base_url TEXT,
     is_enabled BOOLEAN NOT NULL DEFAULT true
 );
 

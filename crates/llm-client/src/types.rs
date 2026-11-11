@@ -83,6 +83,9 @@ pub enum LlmError {
     #[error("Missing API key in environment for provider: {0}")]
     MissingApiKey(String),
 
+    #[error("Missing base URL for provider: {0}")]
+    MissingBaseUrl(String),
+
     #[error("Total exhaustion: all configured models failed after retry attempts")]
     TotalExhaustion,
 

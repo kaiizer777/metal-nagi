@@ -291,7 +291,7 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
                 .with_max_tokens(1024);
 
                 let orchestrator_res =
-                    llm_client::FallbackOrchestrator::from_db(&state.pool, "opencode_go").await;
+                    llm_client::FallbackOrchestrator::from_db(&state.pool).await;
 
                 let orchestrator = match orchestrator_res {
                     Ok(orch) => orch,

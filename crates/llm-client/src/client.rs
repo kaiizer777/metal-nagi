@@ -3,8 +3,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{ChatMessage, LlmError, LlmRequest};
 
-pub const DEFAULT_BASE_URL: &str = "https://opencode.ai/inference/go/openai/v1";
-
 pub trait LlmCaller: Send + Sync {
     fn call<'a>(
         &'a self,
@@ -14,11 +12,14 @@ pub trait LlmCaller: Send + Sync {
 }
 
 #[derive(Clone)]
-pub struct OpenCodeClient {
+pub struct OpenAiCompatibleClient {
     client: reqwest::Client,
     base_url: String,
     api_key: SecretString,
+    model: Option<String>,
 }
+
+pub type GenericLlmClient = OpenAiCompatibleClient;
 
 #[derive(Serialize)]
 struct ChatCompletionRequestBody<'a> {
@@ -45,43 +46,57 @@ struct ChatResponseMessage {
     content: Option<String>,
 }
 
-impl OpenCodeClient {
-    pub fn new(api_key: SecretString) -> Self {
-        let base_url = std::env::var("OPENCODE_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
-        Self::with_base_url(api_key, base_url)
+impl OpenAiCompatibleClient {
+    pub fn new(base_url: impl Into<String>, api_key: SecretString) -> Self {
+        Self::with_client_and_model(base_url, api_key, None, None)
     }
 
-    pub fn with_base_url(api_key: SecretString, base_url: impl Into<String>) -> Self {
-        let mut base = base_url.into();
-        while base.ends_with('/') {
-            base.pop();
-        }
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(45))
-            .build()
-            .unwrap_or_default();
-        Self {
-            client,
-            base_url: base,
-            api_key,
-        }
+    pub fn with_model(
+        base_url: impl Into<String>,
+        api_key: SecretString,
+        model: impl Into<String>,
+    ) -> Self {
+        Self::with_client_and_model(base_url, api_key, None, Some(model.into()))
     }
 
     pub fn with_client(
-        api_key: SecretString,
         base_url: impl Into<String>,
+        api_key: SecretString,
         client: reqwest::Client,
+    ) -> Self {
+        Self::with_client_and_model(base_url, api_key, Some(client), None)
+    }
+
+    pub fn with_client_and_model(
+        base_url: impl Into<String>,
+        api_key: SecretString,
+        client: Option<reqwest::Client>,
+        model: Option<String>,
     ) -> Self {
         let mut base = base_url.into();
         while base.ends_with('/') {
             base.pop();
         }
+        let client = client.unwrap_or_else(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(45))
+                .build()
+                .unwrap_or_default()
+        });
         Self {
             client,
             base_url: base,
             api_key,
+            model,
         }
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
     }
 
     pub async fn chat_completion(
@@ -139,7 +154,7 @@ impl OpenCodeClient {
     }
 }
 
-impl LlmCaller for OpenCodeClient {
+impl LlmCaller for OpenAiCompatibleClient {
     fn call<'a>(
         &'a self,
         model: &'a str,
@@ -163,30 +178,40 @@ mod tests {
                     "index": 0,
                     "message": {
                         "role": "assistant",
-                        "content": "Hello from OpenCode!"
+                        "content": "Hello from mock provider!"
                     },
                     "finish_reason": "stop"
                 }
             ],
-            "model": "beam-free"
+            "model": "test-model-1"
         }"#;
 
         let parsed: ChatCompletionResponseBody = serde_json::from_str(raw_json).unwrap();
         assert_eq!(
             parsed.choices[0].message.content.as_deref(),
-            Some("Hello from OpenCode!")
+            Some("Hello from mock provider!")
         );
     }
 
     #[test]
     fn handles_base_url_trailing_slashes() {
-        let client = OpenCodeClient::with_base_url(
+        let client = OpenAiCompatibleClient::new(
+            "https://mock-provider.example.com/v1///",
             SecretString::new("test-key".into()),
-            "https://opencode.ai/inference/go/openai/v1///",
         );
         assert_eq!(
-            client.base_url,
-            "https://opencode.ai/inference/go/openai/v1"
+            client.base_url(),
+            "https://mock-provider.example.com/v1"
         );
+    }
+
+    #[test]
+    fn instantiates_with_optional_model() {
+        let client = OpenAiCompatibleClient::with_model(
+            "https://mock-provider.example.com/v1",
+            SecretString::new("test-key".into()),
+            "test-model-1",
+        );
+        assert_eq!(client.model(), Some("test-model-1"));
     }
 }
