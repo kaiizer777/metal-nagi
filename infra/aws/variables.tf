@@ -44,3 +44,16 @@ variable "rust_log" {
   default     = "info,nagi_lambda=debug"
   description = "RUST_LOG logging level filter"
 }
+
+variable "opencode_api_key" {
+  type        = string
+  sensitive   = true
+  description = "OpenCode API key for LLM inference"
+}
+
+variable "opencode_base_url" {
+  type        = string
+  default     = "https://opencode.ai/inference/go/openai/v1"
+  description = "OpenCode base URL for LLM inference"
+}
+
