@@ -51,6 +51,8 @@ pub struct CommentPayload {
 pub struct IssuePayload {
     pub number: i64,
     pub title: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
     pub pull_request: Option<serde_json::Value>,
 }
 
@@ -140,6 +142,7 @@ mod tests {
         let issue_only = IssuePayload {
             number: 42,
             title: Some("Bug report".to_string()),
+            body: None,
             pull_request: None,
         };
         assert_eq!(parse_pipeline_type(&issue_only), PipelineType::A);
@@ -147,6 +150,7 @@ mod tests {
         let pr_issue = IssuePayload {
             number: 43,
             title: Some("New feature".to_string()),
+            body: None,
             pull_request: Some(serde_json::json!({
                 "url": "https://api.github.com/repos/owner/repo/pulls/43"
             })),

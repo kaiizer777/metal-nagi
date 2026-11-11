@@ -2,7 +2,9 @@ use std::sync::Arc;
 use lambda_http::{run, service_fn, Body, Error, Request, Response};
 use nagi_lambda::db::{self, post_locked_comment, LockResult};
 use nagi_lambda::git::{cleanup_repo_dir, shallow_clone_repo};
-use nagi_lambda::webhook::{contains_mention, parse_pipeline_type, IssueCommentWebhookEvent};
+use nagi_lambda::webhook::{
+    contains_mention, parse_pipeline_type, IssueCommentWebhookEvent, PipelineType,
+};
 use serde_json::json;
 use sqlx::PgPool;
 use tracing::{error, info, warn};
@@ -221,7 +223,7 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
 
     // 10. Execute shallow clone
     if let Some(installation) = &webhook_event.installation {
-        match shallow_clone_repo(
+        let repo_path = match shallow_clone_repo(
             &state.http_client,
             &state.github_config,
             installation.id,
@@ -230,15 +232,7 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
         )
         .await
         {
-            Ok(repo_path) => {
-                info!(job_id = %job_id, path = %repo_path.display(), "shallow clone succeeded");
-                if let Err(cleanup_err) = cleanup_repo_dir(&repo_path).await {
-                    warn!(job_id = %job_id, path = %repo_path.display(), error = %cleanup_err, "failed to cleanup clone directory");
-                }
-                if let Err(status_err) = db::update_job_status(&state.pool, job_id, "completed", 1).await {
-                    error!(job_id = %job_id, error = %status_err, "failed to update job status to completed");
-                }
-            }
+            Ok(path) => path,
             Err(e) => {
                 error!(job_id = %job_id, error = %e, "git shallow clone failed");
                 if let Err(status_err) = db::release_lock(&state.pool, job_id, "failed").await {
@@ -253,6 +247,215 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
                     }),
                 );
             }
+        };
+
+        info!(job_id = %job_id, path = %repo_path.display(), "shallow clone succeeded");
+
+        match pipeline_type {
+            PipelineType::A => {
+                let phase_input = json!({
+                    "issue_title": webhook_event.issue.title,
+                    "issue_body": webhook_event.issue.body,
+                    "comment_body": webhook_event.comment.body,
+                    "repo": webhook_event.repository.full_name,
+                });
+
+                if let Err(e) = db::record_job_phase(
+                    &state.pool,
+                    job_id,
+                    1,
+                    "in_progress",
+                    Some(&phase_input),
+                    None,
+                )
+                .await
+                {
+                    warn!(job_id = %job_id, error = %e, "failed to record job_phase 1 in_progress");
+                }
+
+                let prompt = format!(
+                    "Repository: {}\nIssue #{}: {}\nIssue Body:\n{}\n\nTrigger Comment:\n{}",
+                    webhook_event.repository.full_name,
+                    webhook_event.issue.number,
+                    webhook_event.issue.title.as_deref().unwrap_or(""),
+                    webhook_event.issue.body.as_deref().unwrap_or(""),
+                    webhook_event.comment.body
+                );
+
+                let request = llm_client::LlmRequest::new(vec![
+                    llm_client::ChatMessage::system(
+                        "You are Nagi, an autonomous AI software engineer. Analyze the GitHub issue and create an execution plan.",
+                    ),
+                    llm_client::ChatMessage::user(prompt),
+                ])
+                .with_max_tokens(1024);
+
+                let orchestrator_res =
+                    llm_client::FallbackOrchestrator::from_db(&state.pool, "opencode_go").await;
+
+                let orchestrator = match orchestrator_res {
+                    Ok(orch) => orch,
+                    Err(e) => {
+                        error!(job_id = %job_id, error = %e, "failed to initialize FallbackOrchestrator from db");
+                        if let Err(cleanup_err) = cleanup_repo_dir(&repo_path).await {
+                            warn!(job_id = %job_id, path = %repo_path.display(), error = %cleanup_err, "failed to cleanup clone directory");
+                        }
+                        let _ = db::transition_to_needs_human(&state.pool, job_id, 1).await;
+                        let _ = db::record_job_phase(
+                            &state.pool,
+                            job_id,
+                            1,
+                            "failed",
+                            Some(&phase_input),
+                            Some(&json!({ "error": e.to_string() })),
+                        )
+                        .await;
+
+                        if let Ok(octo) = gh_core::create_app_installation_client(
+                            &state.github_config,
+                            installation.id,
+                        )
+                        .await
+                        {
+                            let issue_num_u64 = u64::try_from(webhook_event.issue.number).unwrap_or(0);
+                            let _ = db::post_exhaustion_comment(
+                                &octo,
+                                &webhook_event.repository.owner.login,
+                                &webhook_event.repository.name,
+                                issue_num_u64,
+                            )
+                            .await;
+                        }
+
+                        return json_response(
+                            200,
+                            json!({
+                                "status": "needs_human",
+                                "job_id": job_id,
+                                "reason": "llm_exhaustion"
+                            }),
+                        );
+                    }
+                };
+
+                match orchestrator.execute(&request).await {
+                    Ok(llm_res) => {
+                        info!(
+                            job_id = %job_id,
+                            model = %llm_res.model_used,
+                            attempts = llm_res.attempts_taken,
+                            "pipeline A phase 1 planning completed"
+                        );
+
+                        let phase_output = json!({
+                            "model_used": llm_res.model_used,
+                            "provider_used": llm_res.provider_used,
+                            "attempts_taken": llm_res.attempts_taken,
+                            "content": llm_res.content,
+                        });
+
+                        if let Err(e) = db::record_job_phase(
+                            &state.pool,
+                            job_id,
+                            1,
+                            "completed",
+                            Some(&phase_input),
+                            Some(&phase_output),
+                        )
+                        .await
+                        {
+                            error!(job_id = %job_id, error = %e, "failed to record job_phase completed");
+                        }
+
+                        if let Err(status_err) =
+                            db::update_job_status(&state.pool, job_id, "completed", 1).await
+                        {
+                            error!(job_id = %job_id, error = %status_err, "failed to update job status to completed");
+                        }
+                    }
+                    Err(llm_client::LlmError::TotalExhaustion) => {
+                        error!(job_id = %job_id, "total exhaustion encountered across all fallback models");
+
+                        if let Err(e) = db::transition_to_needs_human(&state.pool, job_id, 1).await {
+                            error!(job_id = %job_id, error = %e, "failed to transition job to needs_human");
+                        }
+
+                        let _ = db::record_job_phase(
+                            &state.pool,
+                            job_id,
+                            1,
+                            "failed",
+                            Some(&phase_input),
+                            Some(&json!({ "error": "TotalExhaustion" })),
+                        )
+                        .await;
+
+                        if let Ok(octo) = gh_core::create_app_installation_client(
+                            &state.github_config,
+                            installation.id,
+                        )
+                        .await
+                        {
+                            let issue_num_u64 = u64::try_from(webhook_event.issue.number).unwrap_or(0);
+                            let _ = db::post_exhaustion_comment(
+                                &octo,
+                                &webhook_event.repository.owner.login,
+                                &webhook_event.repository.name,
+                                issue_num_u64,
+                            )
+                            .await;
+                        }
+
+                        if let Err(cleanup_err) = cleanup_repo_dir(&repo_path).await {
+                            warn!(job_id = %job_id, path = %repo_path.display(), error = %cleanup_err, "failed to cleanup clone directory");
+                        }
+
+                        return json_response(
+                            200,
+                            json!({
+                                "status": "needs_human",
+                                "job_id": job_id,
+                                "reason": "llm_exhaustion"
+                            }),
+                        );
+                    }
+                    Err(other_err) => {
+                        error!(job_id = %job_id, error = %other_err, "llm execution encountered unexpected error");
+                        let _ = db::record_job_phase(
+                            &state.pool,
+                            job_id,
+                            1,
+                            "failed",
+                            Some(&phase_input),
+                            Some(&json!({ "error": other_err.to_string() })),
+                        )
+                        .await;
+                        let _ = db::release_lock(&state.pool, job_id, "failed").await;
+                        if let Err(cleanup_err) = cleanup_repo_dir(&repo_path).await {
+                            warn!(job_id = %job_id, path = %repo_path.display(), error = %cleanup_err, "failed to cleanup clone directory");
+                        }
+                        return json_response(
+                            500,
+                            json!({
+                                "status": "error",
+                                "job_id": job_id,
+                                "message": format!("llm execution error: {other_err}")
+                            }),
+                        );
+                    }
+                }
+            }
+            PipelineType::B => {
+                if let Err(status_err) =
+                    db::update_job_status(&state.pool, job_id, "completed", 1).await
+                {
+                    error!(job_id = %job_id, error = %status_err, "failed to update job status to completed");
+                }
+            }
+        }
+
+        if let Err(cleanup_err) = cleanup_repo_dir(&repo_path).await {
+            warn!(job_id = %job_id, path = %repo_path.display(), error = %cleanup_err, "failed to cleanup clone directory");
         }
     } else {
         warn!(job_id = %job_id, "no installation id present in webhook event, skipping clone");

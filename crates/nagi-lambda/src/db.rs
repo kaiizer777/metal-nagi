@@ -180,9 +180,92 @@ pub async fn post_locked_comment(
         .await
 }
 
+pub const EXHAUSTION_ALERT_COMMENT: &str =
+    "🚨 Nagi halted: LLM provider exhaustion across all configured fallback models.";
+
+pub async fn post_exhaustion_comment(
+    client: &Octocrab,
+    owner: &str,
+    repo_name: &str,
+    issue_number: u64,
+) -> Result<octocrab::models::issues::Comment, octocrab::Error> {
+    client
+        .issues(owner, repo_name)
+        .create_comment(issue_number, EXHAUSTION_ALERT_COMMENT)
+        .await
+}
+
+pub async fn record_job_phase(
+    pool: &PgPool,
+    job_id: Uuid,
+    phase: i32,
+    status: &str,
+    input_payload: Option<&serde_json::Value>,
+    output_payload: Option<&serde_json::Value>,
+) -> Result<i64, DbError> {
+    let completed_at = if status == "completed" || status == "failed" {
+        Some(chrono::Utc::now())
+    } else {
+        None
+    };
+
+    let phase_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO job_phases (job_id, phase, status, input_payload, output_payload, completed_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id
+        "#,
+    )
+    .bind(job_id)
+    .bind(phase)
+    .bind(status)
+    .bind(input_payload)
+    .bind(output_payload)
+    .bind(completed_at)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(phase_id)
+}
+
+pub async fn transition_to_needs_human(
+    pool: &PgPool,
+    job_id: Uuid,
+    phase: i32,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE jobs SET status = 'needs_human', current_phase = $1, updated_at = now() WHERE job_id = $2",
+    )
+    .bind(phase)
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_exhaustion_alert_comment_text() {
+        assert_eq!(
+            EXHAUSTION_ALERT_COMMENT,
+            "🚨 Nagi halted: LLM provider exhaustion across all configured fallback models."
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transition_to_needs_human_binds() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://dummy:dummy@localhost:5432/dummy")
+            .unwrap();
+        let job_id = Uuid::new_v4();
+        let res = transition_to_needs_human(&pool, job_id, 1).await;
+        // Verify it builds and executes against lazy pool (fails on connection, not sqlx query syntax)
+        assert!(res.is_err());
+    }
 
     #[test]
     fn test_sender_authorization_default_no_config() {

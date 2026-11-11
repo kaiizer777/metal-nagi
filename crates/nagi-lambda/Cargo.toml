@@ -11,6 +11,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 gh-core = { path = "../gh-core" }
+llm-client = { path = "../llm-client" }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"] }
 uuid = { version = "1.11", features = ["v4", "serde"] }
 secrecy = { version = "0.10", features = ["serde"] }
