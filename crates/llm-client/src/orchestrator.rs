@@ -11,9 +11,10 @@ use crate::types::{LlmError, LlmRequest, LlmResponse};
 pub fn is_retryable_for_model(err: &LlmError) -> bool {
     match err {
         LlmError::Http(e) => e.is_timeout() || e.is_connect() || e.is_request(),
-        LlmError::ApiError { status, body } => {
-            *status == 429 || (*status >= 500 && *status < 600) || body.contains("Malformed JSON")
+        LlmError::ApiError { status, .. } => {
+            *status == 429 || (*status >= 500 && *status < 600)
         }
+        LlmError::MalformedResponse(_) => true,
         LlmError::Json(_) => true,
         _ => false,
     }
@@ -44,6 +45,7 @@ pub struct FallbackOrchestrator {
     candidates: Vec<FallbackCandidate>,
     backoff: Duration,
     max_attempts_per_model: u32,
+    timeout: Duration,
 }
 
 impl FallbackOrchestrator {
@@ -52,6 +54,7 @@ impl FallbackOrchestrator {
             candidates,
             backoff: Duration::from_secs(5),
             max_attempts_per_model: 3,
+            timeout: Duration::from_secs(90),
         }
     }
 
@@ -63,6 +66,15 @@ impl FallbackOrchestrator {
     pub fn with_max_attempts_per_model(mut self, max: u32) -> Self {
         self.max_attempts_per_model = max;
         self
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    pub fn timeout(&self) -> Duration {
+        self.timeout
     }
 
     pub fn candidates(&self) -> &[FallbackCandidate] {
@@ -84,7 +96,9 @@ impl FallbackOrchestrator {
 
         if rows.is_empty() {
             warn!("no enabled providers or models found in database");
-            return Err(LlmError::TotalExhaustion);
+            return Err(LlmError::NoModelsConfigured(
+                "No enabled providers or models found in database".to_string(),
+            ));
         }
 
         let http_client = reqwest::Client::builder()
@@ -147,59 +161,72 @@ impl FallbackOrchestrator {
     }
 
     pub async fn execute(&self, request: &LlmRequest) -> Result<LlmResponse, LlmError> {
-        let mut total_attempts: u32 = 0;
+        let work = async {
+            let mut total_attempts: u32 = 0;
 
-        for candidate in &self.candidates {
-            info!(
-                provider = %candidate.provider_name,
-                model = %candidate.model_name,
-                "attempting model completion"
-            );
+            for candidate in &self.candidates {
+                info!(
+                    provider = %candidate.provider_name,
+                    model = %candidate.model_name,
+                    "attempting model completion"
+                );
 
-            for attempt in 1..=self.max_attempts_per_model {
-                total_attempts += 1;
+                for attempt in 1..=self.max_attempts_per_model {
+                    total_attempts += 1;
 
-                match candidate.caller.call(&candidate.model_name, request).await {
-                    Ok(content) => {
-                        info!(
-                            provider = %candidate.provider_name,
-                            model = %candidate.model_name,
-                            total_attempts,
-                            attempt_on_model = attempt,
-                            "model completion succeeded"
-                        );
-                        return Ok(LlmResponse {
-                            content,
-                            model_used: candidate.model_name.clone(),
-                            provider_used: candidate.provider_name.clone(),
-                            attempts_taken: total_attempts,
-                        });
-                    }
-                    Err(err) => {
-                        let retryable = is_retryable_for_model(&err);
-                        warn!(
-                            provider = %candidate.provider_name,
-                            model = %candidate.model_name,
-                            attempt,
-                            retryable,
-                            error = %err,
-                            "attempt failed"
-                        );
+                    match candidate.caller.call(&candidate.model_name, request).await {
+                        Ok(content) => {
+                            info!(
+                                provider = %candidate.provider_name,
+                                model = %candidate.model_name,
+                                total_attempts,
+                                attempt_on_model = attempt,
+                                "model completion succeeded"
+                            );
+                            return Ok(LlmResponse {
+                                content,
+                                model_used: candidate.model_name.clone(),
+                                provider_used: candidate.provider_name.clone(),
+                                attempts_taken: total_attempts,
+                            });
+                        }
+                        Err(err) => {
+                            let retryable = is_retryable_for_model(&err);
+                            warn!(
+                                provider = %candidate.provider_name,
+                                model = %candidate.model_name,
+                                attempt,
+                                retryable,
+                                error = %err,
+                                "attempt failed"
+                            );
 
-                        if attempt < self.max_attempts_per_model && retryable {
-                            if !self.backoff.is_zero() {
-                                tokio::time::sleep(self.backoff).await;
+                            if attempt < self.max_attempts_per_model && retryable {
+                                if !self.backoff.is_zero() {
+                                    tokio::time::sleep(self.backoff).await;
+                                }
+                            } else {
+                                break;
                             }
-                        } else {
-                            break;
                         }
                     }
                 }
             }
-        }
 
-        warn!(total_attempts, "all configured provider models exhausted");
-        Err(LlmError::TotalExhaustion)
+            warn!(total_attempts, "all configured provider models exhausted");
+            Err(LlmError::TotalExhaustion)
+        };
+
+        match tokio::time::timeout(self.timeout, work).await {
+            Ok(result) => result,
+            Err(_) => {
+                warn!(
+                    timeout_secs = self.timeout.as_secs(),
+                    "overall fallback execution timed out; aborting with total exhaustion"
+                );
+                Err(LlmError::TotalExhaustion)
+            }
+        }
     }
 }
 
@@ -242,6 +269,9 @@ mod tests {
                         status: *status,
                         body: body.clone(),
                     }),
+                    Err(LlmError::MalformedResponse(msg)) => {
+                        Err(LlmError::MalformedResponse(msg.clone()))
+                    }
                     Err(_) => Err(LlmError::TotalExhaustion),
                 }
             } else {
@@ -385,5 +415,85 @@ mod tests {
 
         assert!(matches!(err, LlmError::TotalExhaustion));
         assert_eq!(mock.calls(), 6);
+    }
+
+    #[tokio::test]
+    async fn retries_malformed_response_and_succeeds_on_second_attempt() {
+        let mock = Arc::new(MockClient::new(vec![
+            Err(LlmError::MalformedResponse("Bad JSON from wire".to_string())),
+            Ok("Recovered from malformed response".to_string()),
+        ]));
+        let orchestrator = FallbackOrchestrator::new(vec![
+            FallbackCandidate::new("test-provider-1", "test-model-1", mock.clone()),
+        ])
+        .with_backoff(Duration::ZERO);
+
+        let req = LlmRequest::new(vec![ChatMessage::user("Plan task")]);
+        let res = orchestrator.execute(&req).await.expect("should succeed");
+
+        assert_eq!(res.content, "Recovered from malformed response");
+        assert_eq!(res.attempts_taken, 2);
+        assert_eq!(mock.calls(), 2);
+    }
+
+    struct SlowMockClient {
+        delay: Duration,
+    }
+
+    impl LlmCaller for SlowMockClient {
+        fn call<'a>(
+            &'a self,
+            _model: &'a str,
+            _request: &'a LlmRequest,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, LlmError>> + Send + 'a>>
+        {
+            let delay = self.delay;
+            Box::pin(async move {
+                tokio::time::sleep(delay).await;
+                Ok("Late response".to_string())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn aborts_with_total_exhaustion_when_timeout_deadline_exceeded() {
+        let slow_mock = Arc::new(SlowMockClient {
+            delay: Duration::from_millis(150),
+        });
+        let orchestrator = FallbackOrchestrator::new(vec![
+            FallbackCandidate::new("test-provider-1", "test-model-1", slow_mock),
+        ])
+        .with_timeout(Duration::from_millis(20));
+
+        let req = LlmRequest::new(vec![ChatMessage::user("Plan task")]);
+        let err = orchestrator.execute(&req).await.expect_err("should timeout");
+
+        assert!(matches!(err, LlmError::TotalExhaustion));
+    }
+
+    #[test]
+    fn is_retryable_for_model_classifies_correctly() {
+        assert!(is_retryable_for_model(&LlmError::MalformedResponse(
+            "bad wire format".into()
+        )));
+        assert!(is_retryable_for_model(&LlmError::ApiError {
+            status: 429,
+            body: "rate limited".into(),
+        }));
+        assert!(is_retryable_for_model(&LlmError::ApiError {
+            status: 502,
+            body: "bad gateway".into(),
+        }));
+        assert!(!is_retryable_for_model(&LlmError::ApiError {
+            status: 400,
+            body: "bad request".into(),
+        }));
+        assert!(!is_retryable_for_model(&LlmError::NoModelsConfigured(
+            "no models".into()
+        )));
+        assert!(!is_retryable_for_model(&LlmError::MissingApiKey(
+            "KEY".into()
+        )));
+        assert!(!is_retryable_for_model(&LlmError::TotalExhaustion));
     }
 }

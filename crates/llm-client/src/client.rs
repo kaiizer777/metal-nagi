@@ -135,9 +135,8 @@ impl OpenAiCompatibleClient {
 
         let body_text = response.text().await?;
         let parsed: ChatCompletionResponseBody =
-            serde_json::from_str(&body_text).map_err(|e| LlmError::ApiError {
-                status: 200,
-                body: format!("Malformed JSON response ({e}): {body_text}"),
+            serde_json::from_str(&body_text).map_err(|e| {
+                LlmError::MalformedResponse(format!("Malformed JSON response ({e}): {body_text}"))
             })?;
 
         let content = parsed
@@ -145,10 +144,15 @@ impl OpenAiCompatibleClient {
             .into_iter()
             .next()
             .and_then(|c| c.message.content)
-            .ok_or_else(|| LlmError::ApiError {
-                status: 200,
-                body: "Empty choices in response".to_string(),
+            .ok_or_else(|| {
+                LlmError::MalformedResponse("Empty choices in response".to_string())
             })?;
+
+        if content.trim().is_empty() {
+            return Err(LlmError::MalformedResponse(
+                "Empty or whitespace-only response content from LLM".to_string(),
+            ));
+        }
 
         Ok(content)
     }
@@ -213,5 +217,93 @@ mod tests {
             "test-model-1",
         );
         assert_eq!(client.model(), Some("test-model-1"));
+    }
+
+    async fn spawn_mock_server(
+        status_line: &str,
+        body: &str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let status = status_line.to_string();
+        let body = body.to_string();
+
+        let handle = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            }
+        });
+
+        (format!("http://{}", addr), handle)
+    }
+
+    #[tokio::test]
+    async fn wire_response_200_valid() {
+        let body = r#"{"choices":[{"message":{"content":"Valid response content"}}]}"#;
+        let (base_url, _handle) = spawn_mock_server("200 OK", body).await;
+        let client = OpenAiCompatibleClient::new(base_url, SecretString::new("key".into()));
+        let req = LlmRequest::new(vec![ChatMessage::user("ping")]);
+
+        let result = client.chat_completion("test-model", &req).await.unwrap();
+        assert_eq!(result, "Valid response content");
+    }
+
+    #[tokio::test]
+    async fn wire_response_5xx_returns_api_error() {
+        let body = r#"{"error":"Internal server error"}"#;
+        let (base_url, _handle) = spawn_mock_server("500 Internal Server Error", body).await;
+        let client = OpenAiCompatibleClient::new(base_url, SecretString::new("key".into()));
+        let req = LlmRequest::new(vec![ChatMessage::user("ping")]);
+
+        let err = client.chat_completion("test-model", &req).await.unwrap_err();
+        match err {
+            LlmError::ApiError { status, body: err_body } => {
+                assert_eq!(status, 500);
+                assert!(err_body.contains("Internal server error"));
+            }
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wire_response_malformed_json_returns_malformed_response() {
+        let body = r#"{"choices": [{ broken json"#;
+        let (base_url, _handle) = spawn_mock_server("200 OK", body).await;
+        let client = OpenAiCompatibleClient::new(base_url, SecretString::new("key".into()));
+        let req = LlmRequest::new(vec![ChatMessage::user("ping")]);
+
+        let err = client.chat_completion("test-model", &req).await.unwrap_err();
+        match err {
+            LlmError::MalformedResponse(msg) => {
+                assert!(msg.contains("Malformed JSON response"));
+            }
+            other => panic!("expected MalformedResponse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wire_response_whitespace_content_returns_malformed_response() {
+        let body = r#"{"choices":[{"message":{"content":"   \n\t  "}}]}"#;
+        let (base_url, _handle) = spawn_mock_server("200 OK", body).await;
+        let client = OpenAiCompatibleClient::new(base_url, SecretString::new("key".into()));
+        let req = LlmRequest::new(vec![ChatMessage::user("ping")]);
+
+        let err = client.chat_completion("test-model", &req).await.unwrap_err();
+        match err {
+            LlmError::MalformedResponse(msg) => {
+                assert_eq!(msg, "Empty or whitespace-only response content from LLM");
+            }
+            other => panic!("expected MalformedResponse, got {other:?}"),
+        }
     }
 }

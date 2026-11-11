@@ -80,11 +80,17 @@ pub enum LlmError {
     #[error("Database error: {0}")]
     Db(#[from] sqlx::Error),
 
-    #[error("Missing API key in environment for provider: {0}")]
+    #[error("Missing API key in environment variable: {0}")]
     MissingApiKey(String),
 
     #[error("Missing base URL for provider: {0}")]
     MissingBaseUrl(String),
+
+    #[error("No models configured: {0}")]
+    NoModelsConfigured(String),
+
+    #[error("Malformed response from LLM: {0}")]
+    MalformedResponse(String),
 
     #[error("Total exhaustion: all configured models failed after retry attempts")]
     TotalExhaustion,
@@ -136,15 +142,27 @@ mod tests {
         };
         assert_eq!(err.to_string(), "API error (status 429): Rate limit exceeded");
 
-        let err2 = LlmError::MissingApiKey("opencode_go".to_string());
+        let err2 = LlmError::MissingApiKey("OPENCODE_API_KEY".to_string());
         assert_eq!(
             err2.to_string(),
-            "Missing API key in environment for provider: opencode_go"
+            "Missing API key in environment variable: OPENCODE_API_KEY"
         );
 
-        let err3 = LlmError::TotalExhaustion;
+        let err3 = LlmError::NoModelsConfigured("No enabled providers".to_string());
         assert_eq!(
             err3.to_string(),
+            "No models configured: No enabled providers"
+        );
+
+        let err4 = LlmError::MalformedResponse("Invalid json".to_string());
+        assert_eq!(
+            err4.to_string(),
+            "Malformed response from LLM: Invalid json"
+        );
+
+        let err5 = LlmError::TotalExhaustion;
+        assert_eq!(
+            err5.to_string(),
             "Total exhaustion: all configured models failed after retry attempts"
         );
     }
