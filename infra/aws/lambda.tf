@@ -10,7 +10,7 @@ resource "aws_lambda_function" "nagi" {
 
   layers = ["arn:aws:lambda:us-east-1:553035198032:layer:git-lambda2:8"]
 
-  timeout     = 30
+  timeout     = 120
   memory_size = 256
 
   environment {
@@ -19,6 +19,8 @@ resource "aws_lambda_function" "nagi" {
       GITHUB_APP_ID             = var.github_app_id
       GITHUB_APP_WEBHOOK_SECRET = var.github_app_webhook_secret
       GITHUB_APP_PRIVATE_KEY    = var.github_app_private_key
+      OPENCODE_API_KEY          = var.opencode_api_key
+      OPENCODE_BASE_URL         = var.opencode_base_url
       RUST_LOG                  = var.rust_log
     }
   }
