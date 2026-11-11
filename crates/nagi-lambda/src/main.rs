@@ -300,8 +300,7 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
                         if let Err(cleanup_err) = cleanup_repo_dir(&repo_path).await {
                             warn!(job_id = %job_id, path = %repo_path.display(), error = %cleanup_err, "failed to cleanup clone directory");
                         }
-                        let _ = db::transition_to_needs_human(&state.pool, job_id, 1).await;
-                        let _ = db::record_job_phase(
+                        if let Err(phase_err) = db::record_job_phase(
                             &state.pool,
                             job_id,
                             1,
@@ -309,30 +308,20 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
                             Some(&phase_input),
                             Some(&json!({ "error": e.to_string() })),
                         )
-                        .await;
-
-                        if let Ok(octo) = gh_core::create_app_installation_client(
-                            &state.github_config,
-                            installation.id,
-                        )
                         .await
                         {
-                            let issue_num_u64 = u64::try_from(webhook_event.issue.number).unwrap_or(0);
-                            let _ = db::post_exhaustion_comment(
-                                &octo,
-                                &webhook_event.repository.owner.login,
-                                &webhook_event.repository.name,
-                                issue_num_u64,
-                            )
-                            .await;
+                            error!(job_id = %job_id, error = %phase_err, "failed to record job_phase failed");
+                        }
+                        if let Err(status_err) = db::release_lock(&state.pool, job_id, "failed").await {
+                            error!(job_id = %job_id, error = %status_err, "failed to release lock / update job status to failed");
                         }
 
                         return json_response(
-                            200,
+                            500,
                             json!({
-                                "status": "needs_human",
+                                "status": "error",
                                 "job_id": job_id,
-                                "reason": "llm_exhaustion"
+                                "message": format!("failed to initialize FallbackOrchestrator: {e}")
                             }),
                         );
                     }
@@ -380,7 +369,7 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
                             error!(job_id = %job_id, error = %e, "failed to transition job to needs_human");
                         }
 
-                        let _ = db::record_job_phase(
+                        if let Err(phase_err) = db::record_job_phase(
                             &state.pool,
                             job_id,
                             1,
@@ -388,22 +377,33 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
                             Some(&phase_input),
                             Some(&json!({ "error": "TotalExhaustion" })),
                         )
-                        .await;
+                        .await
+                        {
+                            error!(job_id = %job_id, error = %phase_err, "failed to record job_phase failed");
+                        }
 
-                        if let Ok(octo) = gh_core::create_app_installation_client(
+                        match gh_core::create_app_installation_client(
                             &state.github_config,
                             installation.id,
                         )
                         .await
                         {
-                            let issue_num_u64 = u64::try_from(webhook_event.issue.number).unwrap_or(0);
-                            let _ = db::post_exhaustion_comment(
-                                &octo,
-                                &webhook_event.repository.owner.login,
-                                &webhook_event.repository.name,
-                                issue_num_u64,
-                            )
-                            .await;
+                            Ok(octo) => {
+                                let issue_num_u64 = u64::try_from(webhook_event.issue.number).unwrap_or(0);
+                                if let Err(e) = db::post_exhaustion_comment(
+                                    &octo,
+                                    &webhook_event.repository.owner.login,
+                                    &webhook_event.repository.name,
+                                    issue_num_u64,
+                                )
+                                .await
+                                {
+                                    error!(job_id = %job_id, error = %e, "failed to post exhaustion comment to github");
+                                }
+                            }
+                            Err(e) => {
+                                error!(job_id = %job_id, error = %e, "failed to create installation octocrab client for exhaustion alert");
+                            }
                         }
 
                         if let Err(cleanup_err) = cleanup_repo_dir(&repo_path).await {
@@ -421,7 +421,7 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
                     }
                     Err(other_err) => {
                         error!(job_id = %job_id, error = %other_err, "llm execution encountered unexpected error");
-                        let _ = db::record_job_phase(
+                        if let Err(phase_err) = db::record_job_phase(
                             &state.pool,
                             job_id,
                             1,
@@ -429,8 +429,13 @@ pub async fn handler(state: Arc<AppState>, event: Request) -> Result<Response<Bo
                             Some(&phase_input),
                             Some(&json!({ "error": other_err.to_string() })),
                         )
-                        .await;
-                        let _ = db::release_lock(&state.pool, job_id, "failed").await;
+                        .await
+                        {
+                            error!(job_id = %job_id, error = %phase_err, "failed to record job_phase failed");
+                        }
+                        if let Err(status_err) = db::release_lock(&state.pool, job_id, "failed").await {
+                            error!(job_id = %job_id, error = %status_err, "failed to release lock / update job status to failed");
+                        }
                         if let Err(cleanup_err) = cleanup_repo_dir(&repo_path).await {
                             warn!(job_id = %job_id, path = %repo_path.display(), error = %cleanup_err, "failed to cleanup clone directory");
                         }

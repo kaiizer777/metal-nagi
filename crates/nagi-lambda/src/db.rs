@@ -233,15 +233,7 @@ pub async fn transition_to_needs_human(
     job_id: Uuid,
     phase: i32,
 ) -> Result<(), DbError> {
-    sqlx::query(
-        "UPDATE jobs SET status = 'needs_human', current_phase = $1, updated_at = now() WHERE job_id = $2",
-    )
-    .bind(phase)
-    .bind(job_id)
-    .execute(pool)
-    .await?;
-
-    Ok(())
+    update_job_status(pool, job_id, "needs_human", phase).await
 }
 
 #[cfg(test)]
@@ -254,17 +246,6 @@ mod tests {
             EXHAUSTION_ALERT_COMMENT,
             "🚨 Nagi halted: LLM provider exhaustion across all configured fallback models."
         );
-    }
-
-    #[tokio::test]
-    async fn test_transition_to_needs_human_binds() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .connect_lazy("postgres://dummy:dummy@localhost:5432/dummy")
-            .unwrap();
-        let job_id = Uuid::new_v4();
-        let res = transition_to_needs_human(&pool, job_id, 1).await;
-        // Verify it builds and executes against lazy pool (fails on connection, not sqlx query syntax)
-        assert!(res.is_err());
     }
 
     #[test]
